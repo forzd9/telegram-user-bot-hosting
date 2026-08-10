@@ -42,9 +42,9 @@ logger = logging.getLogger(__name__)
 
 # ===================== الإعدادات العامة =====================
 USER_DATA_DIR = os.path.abspath("user_data")
-BOT_TOKEN = "8608070406:AAFXRbDKo6PpbzqzPzXQn81eWN5B3Jv-Vfo"
+BOT_TOKEN = "8608070406:AAGkdZQ8CXKAafdZOSn-ZJh2nJVVm6B2VFQ"
 ADMIN_ID = 8523524013
-BOT_USERNAME = "@Hostng_bot"
+BOT_USERNAME = "@HOST_1_1_1bot"
 CONTACT_USERNAME = "@mouhamed_ma"
 BACKUP_CHANNEL = "@ToolsforHumanitydoubleyourwe"
 VIP_CHANNEL_ID = "@ToolsforHumanitydoubleyourwe"
@@ -76,8 +76,8 @@ HELP_TEXT = """
 ❓ <b>المساعدة</b>
 
 🔹 <b>كيفية رفع ملف:</b>
-- اضغط على زر "رفع ملف" وأرسل ملف .py.
-- بعد الموافقة، سيتم تشغيل البوت تلقائيًا.
+- اضغط على زر "رفع ملف" وأرسل ملف .py / .js / .php / .zip.
+- بعد الموافقة، سيتم تشغيل البوت تلقائياً.
 
 🔹 <b>كيفية الحصول على نقاط:</b>
 - يمكنك شراء نقاط من المتجر.
@@ -308,6 +308,15 @@ STATUS_AR = {
     "rejected": "❌ مرفوض",
     "running": "▶️ شغال",
     "stopped": "⏹️ متوقف"
+}
+
+# خريطة الامتدادات إلى الأيقونات
+FILE_ICONS = {
+    "py": "🐍",
+    "js": "🟨",
+    "php": "🐘",
+    "zip": "📦",
+    "default": "📄"
 }
 
 def load_db() -> Dict[str, Any]:
@@ -578,7 +587,6 @@ def clean_orphaned_files():
                 logger.error(f"فشل حذف الملف اليتيم {filepath}: {e}")
 
 def cleanup_missing_files_from_db():
-    """حذف الإدخالات في قاعدة البيانات التي تشير إلى ملفات غير موجودة."""
     to_remove = []
     for fid, f in db["files"].items():
         filepath = f.get("path")
@@ -1101,13 +1109,11 @@ def install_package_with_retries(container_manager, user_id, package_name, insta
     if install_name is None:
         install_name = package_name
 
-    # التأكد من وجود دليل .local داخل الحاوية
     container_manager.run_command_in_container(user_id, "mkdir -p /app/.local", detach=False)
 
     for attempt in range(1, retries + 1):
         try:
             upgrade_flag = " --upgrade" if attempt == retries else ""
-            # استخدام environment بدلاً من تعيين المتغيرات في الأمر
             cmd = f"pip install --user {install_name}{upgrade_flag} --no-cache-dir"
             env = {
                 'PYTHONUSERBASE': '/app/.local',
@@ -1209,7 +1215,6 @@ def install_imported_requirements(container_manager, user_id, file_path) -> bool
     failed = []
     for pkg in external_packages:
         install_name = PACKAGE_ALIASES.get(pkg, pkg)
-        # تحقق مما إذا كانت مثبتة بالفعل
         env = {'PYTHONUSERBASE': '/app/.local', 'PATH': '/app/.local/bin:/usr/local/bin:/usr/bin:/bin'}
         check_cmd = f"python3 -c 'import {pkg}' 2>/dev/null && echo installed || echo not_installed"
         check_output = container_manager.run_command_in_container(user_id, check_cmd, detach=False, environment=env)
@@ -1237,7 +1242,7 @@ except ImportError:
     DOCKER_AVAILABLE = False
     logger.warning("مكتبة docker غير مثبتة، لن يعمل نظام الحاويات. يرجى تثبيتها: pip install docker")
 
-CONTAINER_IMAGE = "python:3.11-slim"
+CONTAINER_IMAGE = "host-bot-base:latest"
 MAX_STORAGE_MB = 500
 os.makedirs(USER_DATA_DIR, exist_ok=True)
 
@@ -1295,6 +1300,7 @@ class ContainerManager:
             return None
 
         container_name = self.get_user_container_name(user_id)
+
         try:
             container = self.docker_client.containers.get(container_name)
             if container.status == "running":
@@ -1309,6 +1315,15 @@ class ContainerManager:
             return self._create_container(user_id)
         except Exception as e:
             logger.error(f"خطأ في التأكد من حاوية المستخدم {user_id}: {e}")
+            if "Conflict" in str(e) or "already in use" in str(e):
+                try:
+                    old_container = self.docker_client.containers.get(container_name)
+                    old_container.remove(force=True)
+                    logger.info(f"تم إزالة الحاوية المتعارضة {container_name}")
+                    return self._create_container(user_id)
+                except Exception as e2:
+                    logger.error(f"فشل إزالة الحاوية المتعارضة: {e2}")
+                    return None
             return None
 
     def _create_container(self, user_id: str) -> Optional[str]:
@@ -1337,7 +1352,7 @@ class ContainerManager:
                         "mode": "rw"
                     }
                 },
-                read_only=True,
+                read_only=False,
                 tmpfs={
                     "/tmp": "rw,noexec,nosuid,size=64M"
                 },
@@ -1355,6 +1370,44 @@ class ContainerManager:
             return container_name
         except Exception as e:
             logger.error(f"فشل إنشاء حاوية للمستخدم {user_id}: {e}")
+            return None
+
+    def run_command_in_container(self, user_id: str, command: str, detach: bool = True,
+                                 workdir: str = "/app", environment: Optional[Dict[str, str]] = None) -> Optional[str]:
+        if not self.is_available():
+            return None
+        container_name = self.get_user_container_name(user_id)
+        try:
+            container = self.docker_client.containers.get(container_name)
+            env_list = None
+            if environment:
+                env_list = [f"{k}={v}" for k, v in environment.items()]
+
+            if detach:
+                exec_id = self.docker_client.api.exec_create(
+                    container=container.id,
+                    cmd=command,
+                    workdir=workdir,
+                    environment=env_list,
+                )['Id']
+                self.docker_client.api.exec_start(exec_id, detach=True)
+                return exec_id
+            else:
+                result = container.exec_run(
+                    cmd=command,
+                    workdir=workdir,
+                    detach=False,
+                    stream=False,
+                    environment=env_list,
+                )
+                if result.exit_code != 0:
+                    error_msg = result.output.decode('utf-8', errors='replace').strip()
+                    logger.error(f"الأمر '{command}' فشل مع كود الخروج {result.exit_code}: {error_msg}")
+                    return None
+                output = result.output.decode('utf-8', errors='replace').strip()
+                return output
+        except Exception as e:
+            logger.error(f"خطأ في run_command_in_container: {e}")
             return None
 
     def copy_file_to_container(self, user_id: str, local_path: str, container_path: str) -> bool:
@@ -1381,43 +1434,29 @@ class ContainerManager:
             logger.error(f"خطأ في copy_file_to_container: {e}")
             return False
 
-    def run_command_in_container(self, user_id: str, command: str, detach: bool = True,
-                                 workdir: str = "/app", environment: Optional[Dict[str, str]] = None) -> Optional[str]:
-        """
-        تنفيذ أمر في الحاوية مع إمكانية تحديد متغيرات البيئة.
-        """
+    def copy_file_from_container(self, user_id: str, container_path: str, local_path: str) -> bool:
         if not self.is_available():
-            return None
+            return False
         container_name = self.get_user_container_name(user_id)
         try:
             container = self.docker_client.containers.get(container_name)
-            # تحويل environment إلى قائمة من السلاسل بالصيغة KEY=value
-            env_list = None
-            if environment:
-                env_list = [f"{k}={v}" for k, v in environment.items()]
-
-            if detach:
-                exec_id = self.docker_client.api.exec_create(
-                    container=container.id,
-                    cmd=command,
-                    workdir=workdir,
-                    environment=env_list,
-                )['Id']
-                self.docker_client.api.exec_start(exec_id, detach=True)
-                return exec_id
-            else:
-                result = container.exec_run(
-                    cmd=command,
-                    workdir=workdir,
-                    detach=False,
-                    stream=False,
-                    environment=env_list,
-                )
-                output = result.output.decode('utf-8').strip()
-                return output
+            result = container.exec_run(
+                cmd=["cat", container_path],
+                detach=False,
+                stream=False
+            )
+            if result.exit_code != 0:
+                logger.error(f"فشل قراءة الملف من الحاوية: {container_path}")
+                return False
+            content = result.output
+            os.makedirs(os.path.dirname(local_path), exist_ok=True)
+            with open(local_path, "wb") as f:
+                f.write(content)
+            logger.info(f"تم نسخ الملف من الحاوية: {container_path} -> {local_path}")
+            return True
         except Exception as e:
-            logger.error(f"خطأ في run_command_in_container: {e}")
-            return None
+            logger.error(f"خطأ في copy_file_from_container: {e}")
+            return False
 
     def install_imported_requirements(self, user_id: str, file_path: str) -> bool:
         if not self.is_available():
@@ -1429,21 +1468,60 @@ class ContainerManager:
             return False
         return install_requirements_in_container(self, user_id, file_path)
 
+    def install_node_dependencies(self, user_id: str, file_path: str) -> bool:
+        if not self.is_available():
+            return False
+        base_dir = os.path.dirname(file_path)
+        pkg_file = os.path.join(base_dir, "package.json")
+        if not os.path.exists(pkg_file):
+            return True
+
+        container_path = f"/app/files/package.json"
+        if not self.copy_file_to_container(user_id, pkg_file, container_path):
+            logger.error(f"فشل نسخ package.json إلى حاوية المستخدم {user_id}")
+            return False
+
+        cmd = "npm install --prefix /app/files --no-audit --no-fund"
+        output = self.run_command_in_container(user_id, cmd, detach=False)
+        if output and ("added" in output or "up to date" in output or "removed" in output):
+            logger.info(f"✅ تم تثبيت اعتماديات Node.js للمستخدم {user_id}")
+            return True
+        else:
+            logger.warning(f"⚠️ فشل تثبيت اعتماديات Node.js للمستخدم {user_id}: {output}")
+            return False
+
+    def install_php_dependencies(self, user_id: str, file_path: str) -> bool:
+        if not self.is_available():
+            return False
+        base_dir = os.path.dirname(file_path)
+        composer_file = os.path.join(base_dir, "composer.json")
+        if not os.path.exists(composer_file):
+            return True
+
+        container_path = f"/app/files/composer.json"
+        if not self.copy_file_to_container(user_id, composer_file, container_path):
+            logger.error(f"فشل نسخ composer.json إلى حاوية المستخدم {user_id}")
+            return False
+
+        cmd = "composer install --working-dir=/app/files --no-interaction --no-dev --no-progress"
+        output = self.run_command_in_container(user_id, cmd, detach=False)
+        if output and ("Installing" in output or "Nothing to install" in output or "Already installed" in output):
+            logger.info(f"✅ تم تثبيت اعتماديات PHP للمستخدم {user_id}")
+            return True
+        else:
+            logger.warning(f"⚠️ فشل تثبيت اعتماديات PHP للمستخدم {user_id}: {output}")
+            return False
+
     def start_process_and_get_pid(self, user_id: str, base_cmd: str, fid: str, workdir: str = "/app") -> Tuple[Optional[int], Optional[str]]:
-        """
-        تشغيل عملية في الحاوية والحصول على PID ومحتوى السجل الأولي.
-        """
         if not self.is_available():
             return None, None
         container_name = self.get_user_container_name(user_id)
         try:
             container = self.docker_client.containers.get(container_name)
 
-            # اكتشاف إصدار بايثون
             version = get_python_version_in_container(self, user_id)
             python_path = f"/app/.local/lib/python{version}/site-packages"
 
-            # إعداد متغيرات البيئة
             env = {
                 'PYTHONUSERBASE': '/app/.local',
                 'PYTHONPATH': python_path,
@@ -1456,7 +1534,6 @@ class ContainerManager:
             full_cmd = f"{base_cmd} > {log_file} 2>&1 & echo $! > {pid_file}"
             shell_cmd = f"sh -c {shlex.quote(full_cmd)}"
 
-            # تنفيذ الأمر مع البيئة
             exec_id = self.docker_client.api.exec_create(
                 container=container.id,
                 cmd=shell_cmd,
@@ -1467,7 +1544,6 @@ class ContainerManager:
 
             time.sleep(2)
 
-            # قراءة PID
             pid_result = container.exec_run(
                 cmd=["cat", pid_file],
                 workdir=workdir,
@@ -1484,7 +1560,6 @@ class ContainerManager:
                 return None, None
             pid = int(pid_str)
 
-            # قراءة بداية السجل
             log_result = container.exec_run(
                 cmd=["head", "-c", "500", log_file],
                 workdir=workdir,
@@ -1546,9 +1621,75 @@ class ContainerManager:
 
 container_manager = ContainerManager()
 
-# ===================== دوال استضافة الملفات =====================
+# ===================== دوال معالجة ملفات ZIP كبوتات =====================
+
+def extract_zip_bot(zip_path: str, user_id: str, fid: str) -> Optional[str]:
+    """
+    استخراج ملف ZIP للبوت، والبحث عن main.py.
+    تعيد مسار main.py المستخرج، أو None إذا لم يوجد.
+    يتم الاستخراج في مجلد خاص بالمستخدم.
+    """
+    user_dir = container_manager.get_user_dir(str(user_id))
+    extract_dir = os.path.join(user_dir, "files", f"zip_{fid}")
+    os.makedirs(extract_dir, exist_ok=True)
+
+    try:
+        with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+            # التحقق من وجود main.py في الجذر
+            all_names = zip_ref.namelist()
+            main_candidates = [name for name in all_names if name.endswith('main.py') and '/' not in name]
+            if not main_candidates:
+                # البحث في مجلدات فرعية (مستوى واحد فقط)
+                for name in all_names:
+                    if name.endswith('main.py'):
+                        # تحقق أنه ليس في عمق كبير (مستوى واحد)
+                        parts = name.split('/')
+                        if len(parts) <= 2:
+                            main_candidates.append(name)
+                if not main_candidates:
+                    logger.warning(f"لم يتم العثور على main.py في ZIP للمستخدم {user_id}")
+                    shutil.rmtree(extract_dir, ignore_errors=True)
+                    return None
+            # استخراج كل الملفات
+            zip_ref.extractall(extract_dir)
+            # تحديد مسار main.py المختار (أول واحد)
+            main_path = os.path.join(extract_dir, main_candidates[0])
+            if not os.path.exists(main_path):
+                logger.error(f"main_path غير موجود: {main_path}")
+                shutil.rmtree(extract_dir, ignore_errors=True)
+                return None
+            logger.info(f"تم استخراج ZIP للمستخدم {user_id}، main.py في {main_path}")
+            return main_path
+    except Exception as e:
+        logger.error(f"فشل استخراج ZIP للمستخدم {user_id}: {e}")
+        shutil.rmtree(extract_dir, ignore_errors=True)
+        return None
+
+def prepare_zip_bot_environment(user_id: str, fid: str, extracted_main: str) -> Tuple[str, str]:
+    """
+    نقل ملفات ZIP إلى المجلد النهائي وتجهيز البيئة.
+    تعيد (المسار النهائي لـ main.py، مسار مجلد العمل).
+    """
+    user_dir = container_manager.get_user_dir(str(user_id))
+    zip_dir = os.path.join(user_dir, "files", f"zip_{fid}")
+    # مجلد العمل سيكون هو zip_dir نفسه
+    main_path = os.path.join(zip_dir, os.path.basename(extracted_main))
+    return main_path, zip_dir
+
+# ===================== دوال استضافة الملفات (متعددة اللغات) =====================
+
+def get_file_extension(filename: str) -> str:
+    ext = os.path.splitext(filename)[1].lower()
+    if ext.startswith('.'):
+        ext = ext[1:]
+    return ext
+
+def get_file_type_icon(filename: str) -> str:
+    ext = get_file_extension(filename)
+    return FILE_ICONS.get(ext, FILE_ICONS["default"])
 
 def start_hosted_bot(fid):
+    """تشغيل بوت مستضاف مع دعم متعدد اللغات (Python, JS, PHP, ZIP)."""
     f = db["files"].get(fid)
     if not f or fid in running_processes:
         return
@@ -1593,6 +1734,136 @@ def start_hosted_bot(fid):
             pass
         return
 
+    file_ext = get_file_extension(f.get("filename", ""))
+    f["file_ext"] = file_ext
+
+    # === معالجة ملف ZIP ===
+    if file_ext == "zip":
+        logger.info(f"📦 معالجة ملف ZIP للمستخدم {user_id}: {f['filename']}")
+        extracted_main = extract_zip_bot(temp_path, user_id, fid)
+        if not extracted_main:
+            logger.error(f"فشل استخراج ZIP أو لا يوجد main.py للمستخدم {user_id}")
+            f["status"] = "stopped"
+            save_db()
+            try:
+                bot.send_message(
+                    int(user_id),
+                    f"❌ فشل استخراج ZIP أو لا يحتوي على ملف main.py في الجذر."
+                )
+            except:
+                pass
+            return
+
+        # تجهيز البيئة
+        main_path, work_dir = prepare_zip_bot_environment(user_id, fid, extracted_main)
+        # نسخ main_path إلى الحاوية
+        container_filename = f"{fid}_main.py"
+        container_path = f"/app/files/{container_filename}"
+        if not container_manager.copy_file_to_container(user_id, main_path, container_path):
+            logger.error(f"فشل نسخ main.py إلى حاوية المستخدم {user_id}")
+            f["status"] = "stopped"
+            save_db()
+            return
+
+        # تثبيت المتطلبات إذا وجدت في مجلد العمل
+        req_file = os.path.join(work_dir, "requirements.txt")
+        deps_success = True
+        if os.path.exists(req_file):
+            # نسخ requirements.txt إلى الحاوية
+            container_req = "/app/files/requirements.txt"
+            if container_manager.copy_file_to_container(user_id, req_file, container_req):
+                # تثبيت باستخدام الدالة الموجودة
+                if not container_manager.install_requirements_in_container(user_id, main_path):
+                    logger.warning(f"فشل تثبيت المتطلبات من requirements.txt لـ ZIP للمستخدم {user_id}")
+                    deps_success = False
+            else:
+                logger.warning("فشل نسخ requirements.txt")
+                deps_success = False
+
+        # تثبيت المكتبات المستوردة من main.py
+        if deps_success:
+            if not container_manager.install_imported_requirements(user_id, main_path):
+                logger.warning(f"فشل تثبيت المكتبات المستوردة لـ ZIP للمستخدم {user_id}")
+                deps_success = False
+
+        if not deps_success:
+            f["status"] = "stopped"
+            save_db()
+            try:
+                bot.send_message(
+                    int(user_id),
+                    f"⚠️ تم استخراج ZIP لكن فشل تثبيت بعض المتطلبات. حاول تثبيتها يدوياً باستخدام زر تثبيت المكاتب."
+                )
+            except:
+                pass
+            # نستمر في التشغيل رغم فشل التثبيت؟ نفضل أن نوقف
+            # لكن قد نسمح بالتشغيل إذا كان المستخدم يريد المحاولة.
+            # سنوقف هنا لأن المتطلبات مهمة.
+            return
+
+        # تحديد أمر التشغيل (بايثون)
+        base_cmd = f"python3 -u {shlex.quote(container_path)}"
+        # تشغيل العملية
+        pid, log_content = container_manager.start_process_and_get_pid(user_id, base_cmd, fid, workdir="/app")
+        if pid is None:
+            logger.warning(f"لم يتم الحصول على PID للبوت المستخرج من ZIP {fid}.")
+            log_file = container_manager.get_log_path(user_id, fid)
+            if os.path.exists(log_file):
+                with open(log_file, 'r') as lf:
+                    content = lf.read()
+                    if "Error" in content or "Exception" in content:
+                        logger.error(f"البوت {fid} انتهى بخطأ. السجل: {content[:200]}")
+                        f["status"] = "stopped"
+                        save_db()
+                        try:
+                            bot.send_message(
+                                int(user_id),
+                                f"❌ حدث خطأ أثناء تشغيل بوتك المستخرج من ZIP. يرجى مراجعة السجل: /file_log_{fid}\n\n<pre>{esc(content[:500])}</pre>"
+                            )
+                        except:
+                            pass
+                        return
+            f["status"] = "stopped"
+            save_db()
+            return
+
+        time.sleep(3)
+        if not container_manager.is_process_running(user_id, pid):
+            logger.warning(f"البوت المستخرج من ZIP {fid} انتهى فوراً (PID {pid})")
+            log_path = container_manager.get_log_path(user_id, fid)
+            if os.path.exists(log_path):
+                with open(log_path, 'r') as lf:
+                    error_log = lf.read()
+                    if error_log:
+                        try:
+                            bot.send_message(
+                                int(user_id),
+                                f"❌ بوتك المستخرج من ZIP توقف فوراً بسبب خطأ:\n<pre>{esc(error_log[:500])}</pre>"
+                            )
+                        except:
+                            pass
+            f["status"] = "stopped"
+            save_db()
+            return
+
+        running_processes[fid] = {
+            "container_name": container_name,
+            "pid": pid,
+            "log_path": container_manager.get_log_path(user_id, fid),
+            "file_path": container_path,
+            "container_filename": container_filename,
+            "file_type": "zip_py"
+        }
+
+        f["status"] = "running"
+        f["pid"] = pid
+        f["last_bill"] = now_iso()
+        f["last_started"] = now_iso()
+        save_db()
+        logger.info(f"تم تشغيل البوت المستخرج من ZIP {fid} في حاوية {container_name} (PID: {pid})")
+        return
+
+    # === معالجة الملفات العادية (py, js, php) ===
     container_filename = f"{fid}_{f['filename']}"
     container_path = f"/app/files/{container_filename}"
     if not container_manager.copy_file_to_container(user_id, temp_path, container_path):
@@ -1601,27 +1872,48 @@ def start_hosted_bot(fid):
         save_db()
         return
 
-    # تثبيت المتطلبات
-    req_installed = container_manager.install_requirements_in_container(user_id, temp_path)
-    if not req_installed:
-        logger.warning(f"فشل تثبيت المتطلبات من requirements.txt، سنحاول تثبيت المكتبات المستوردة.")
+    deps_success = True
+    if file_ext == "py":
+        req_installed = container_manager.install_requirements_in_container(user_id, temp_path)
+        if not req_installed:
+            logger.warning(f"فشل تثبيت المتطلبات من requirements.txt، سنحاول تثبيت المكتبات المستوردة.")
+        imported_installed = container_manager.install_imported_requirements(user_id, temp_path)
+        if not req_installed and not imported_installed:
+            logger.error(f"فشل تثبيت جميع المتطلبات للمستخدم {user_id}")
+            deps_success = False
+    elif file_ext == "js":
+        deps_success = container_manager.install_node_dependencies(user_id, temp_path)
+    elif file_ext == "php":
+        deps_success = container_manager.install_php_dependencies(user_id, temp_path)
+    else:
+        logger.error(f"نوع ملف غير مدعوم: {file_ext}")
+        f["status"] = "stopped"
+        save_db()
+        return
 
-    imported_installed = container_manager.install_imported_requirements(user_id, temp_path)
-
-    if not req_installed and not imported_installed:
-        logger.error(f"فشل تثبيت جميع المتطلبات للمستخدم {user_id}")
+    if not deps_success:
         f["status"] = "stopped"
         save_db()
         try:
             bot.send_message(
                 int(user_id),
-                f"❌ فشل تثبيت المتطلبات المطلوبة لتشغيل بوتك. تأكد من وجود ملف requirements.txt صحيح أو أن جميع المكتبات المطلوبة متاحة."
+                f"❌ فشل تثبيت المتطلبات المطلوبة لتشغيل بوتك. تأكد من وجود ملف المتطلبات الصحيح."
             )
         except:
             pass
         return
 
-    base_cmd = f"python3 -u {shlex.quote(container_path)}"
+    if file_ext == "py":
+        base_cmd = f"python3 -u {shlex.quote(container_path)}"
+    elif file_ext == "js":
+        base_cmd = f"node {shlex.quote(container_path)}"
+    elif file_ext == "php":
+        base_cmd = f"php {shlex.quote(container_path)}"
+    else:
+        f["status"] = "stopped"
+        save_db()
+        return
+
     pid, log_content = container_manager.start_process_and_get_pid(user_id, base_cmd, fid, workdir="/app")
     if pid is None:
         logger.warning(f"لم يتم الحصول على PID للبوت {fid}.")
@@ -1670,6 +1962,7 @@ def start_hosted_bot(fid):
         "log_path": container_manager.get_log_path(user_id, fid),
         "file_path": container_path,
         "container_filename": container_filename,
+        "file_type": file_ext
     }
 
     f["status"] = "running"
@@ -1677,7 +1970,7 @@ def start_hosted_bot(fid):
     f["last_bill"] = now_iso()
     f["last_started"] = now_iso()
     save_db()
-    logger.info(f"تم تشغيل البوت {fid} في حاوية {container_name} (PID: {pid})")
+    logger.info(f"تم تشغيل البوت {fid} في حاوية {container_name} (PID: {pid}, النوع: {file_ext})")
 
 def stop_hosted_bot(fid):
     f = db["files"].get(fid)
@@ -1812,144 +2105,6 @@ def cleanup_loop():
         except Exception as e:
             logger.error(f"خطأ في حلقة التنظيف: {e}")
 
-# ===================== دوال تثبيت المكتبات الجديدة =====================
-
-def extract_zip_safely(zip_path, extract_to, max_size_mb=10, max_files=100):
-    """استخراج ملف zip بأمان مع التحقق من الحجم وعدد الملفات ومنع Zip Slip."""
-    try:
-        if not zipfile.is_zipfile(zip_path):
-            return False, "الملف ليس ملف zip صالح."
-        with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-            # التحقق من الحجم الكلي وعدد الملفات
-            total_size = 0
-            file_count = 0
-            for info in zip_ref.infolist():
-                if info.is_dir():
-                    continue
-                total_size += info.file_size
-                file_count += 1
-                if total_size > max_size_mb * 1024 * 1024:
-                    return False, f"حجم الملفات المستخرجة يتجاوز الحد الأقصى ({max_size_mb} ميجابايت)."
-                if file_count > max_files:
-                    return False, f"عدد الملفات يتجاوز الحد الأقصى ({max_files} ملف)."
-            # استخراج آمن مع منع Zip Slip
-            for info in zip_ref.infolist():
-                target_path = os.path.join(extract_to, info.filename)
-                if not os.path.realpath(target_path).startswith(os.path.realpath(extract_to)):
-                    return False, "محاولة اختراق (Zip Slip) مكتشفة."
-            zip_ref.extractall(extract_to)
-        return True, "تم فك الضغط بنجاح."
-    except Exception as e:
-        return False, f"خطأ في فك الضغط: {e}"
-
-def process_library_installation(user_id, fid, file_path, file_name, chat_id):
-    """
-    معالجة ملف المكتبات (txt أو zip) وتثبيت المكتبات المذكورة داخل حاوية المستخدم.
-    """
-    try:
-        # التأكد من وجود الحاوية وتشغيلها
-        container_name = container_manager.ensure_container(str(user_id))
-        if not container_name:
-            bot.send_message(chat_id, "❌ فشل في إنشاء بيئة التشغيل. تأكد من أن Docker يعمل.")
-            return
-
-        packages = []
-        if file_name.endswith(".txt"):
-            with open(file_path, "r", encoding="utf-8") as f:
-                lines = f.read().splitlines()
-            for line in lines:
-                line = line.strip()
-                if line and not line.startswith("#"):
-                    # التحقق من أن السطر آمن (لا يحتوي على رموز أوامر)
-                    # السماح بأسماء المكتبات مع محددات الإصدار (==, >=, إلخ)
-                    if re.match(r'^[a-zA-Z0-9_.\-]+([=<>!~]+[a-zA-Z0-9_.\-]+)*$', line):
-                        packages.append(line)
-                    else:
-                        logger.warning(f"تم تجاهل سطر غير صالح: {line}")
-        elif file_name.endswith(".zip"):
-            # استخراج آمن
-            extract_dir = os.path.join(UPLOADS_DIR, "temp_libs_extract", f"{user_id}_{fid}")
-            os.makedirs(extract_dir, exist_ok=True)
-            success, msg = extract_zip_safely(file_path, extract_dir)
-            if not success:
-                bot.send_message(chat_id, f"❌ فشل فك الضغط: {msg}")
-                return
-            # البحث عن جميع ملفات .txt
-            for root, _, files in os.walk(extract_dir):
-                for fname in files:
-                    if fname.endswith(".txt"):
-                        txt_path = os.path.join(root, fname)
-                        with open(txt_path, "r", encoding="utf-8") as f:
-                            lines = f.read().splitlines()
-                        for line in lines:
-                            line = line.strip()
-                            if line and not line.startswith("#"):
-                                if re.match(r'^[a-zA-Z0-9_.\-]+([=<>!~]+[a-zA-Z0-9_.\-]+)*$', line):
-                                    packages.append(line)
-            # تنظيف المجلد المؤقت
-            shutil.rmtree(extract_dir, ignore_errors=True)
-        else:
-            bot.send_message(chat_id, "❌ نوع ملف غير مدعوم.")
-            return
-
-        if not packages:
-            bot.send_message(chat_id, "❌ لم يتم العثور على أي مكتبات صالحة في الملف.")
-            return
-
-        # إزالة التكرار مع الحفاظ على الترتيب
-        seen = set()
-        unique_packages = []
-        for pkg in packages:
-            if pkg not in seen:
-                seen.add(pkg)
-                unique_packages.append(pkg)
-
-        total = len(unique_packages)
-        bot.send_message(chat_id, f"📦 سيتم تثبيت {total} مكتبة... قد يستغرق بعض الوقت.")
-
-        # إعداد البيئة
-        env = {'PYTHONUSERBASE': '/app/.local', 'PATH': '/app/.local/bin:/usr/local/bin:/usr/bin:/bin'}
-        results = []
-
-        for idx, pkg in enumerate(unique_packages, 1):
-            # استخدام shlex.quote لتجنب injection
-            cmd = f"python3 -m pip install --user {shlex.quote(pkg)} --no-cache-dir"
-            try:
-                output = container_manager.run_command_in_container(str(user_id), cmd, detach=False, environment=env)
-                if output and ("Successfully installed" in output or "Requirement already satisfied" in output):
-                    results.append((pkg, True, "تم التثبيت بنجاح"))
-                else:
-                    error_msg = output if output else "خطأ غير معروف"
-                    # اختصار الرسالة
-                    results.append((pkg, False, error_msg[:100]))
-            except Exception as e:
-                results.append((pkg, False, str(e)[:100]))
-
-        # إعداد التقرير النهائي
-        success_list = [pkg for pkg, ok, _ in results if ok]
-        fail_list = [(pkg, msg) for pkg, ok, msg in results if not ok]
-
-        report = f"📦 <b>تقرير تثبيت المكتبات</b>\n\n"
-        report += f"✅ نجح: {len(success_list)} مكتبة\n"
-        if success_list:
-            report += "• " + "\n• ".join(success_list) + "\n"
-        if fail_list:
-            report += f"❌ فشل: {len(fail_list)} مكتبة\n"
-            for pkg, msg in fail_list:
-                report += f"• {pkg}: {msg}\n"
-        bot.send_message(chat_id, report, parse_mode="HTML")
-
-    except Exception as e:
-        logger.error(f"خطأ في تثبيت المكتبات للمستخدم {user_id}: {e}")
-        bot.send_message(chat_id, f"❌ حدث خطأ أثناء تثبيت المكتبات: {e}")
-    finally:
-        # تنظيف الملف المؤقت
-        try:
-            if os.path.exists(file_path):
-                os.remove(file_path)
-        except:
-            pass
-
 # ===================== معالجات البوت =====================
 @bot.message_handler(commands=["start"])
 def cmd_start(message):
@@ -2021,7 +2176,6 @@ def handle_document(message):
         return
 
     action_data = pending_action.get(user_id, {})
-    # معالجة تحديث ملف البوت (تحديث الكود)
     if action_data.get("action") == "awaiting_file_update":
         fid = action_data.get("fid")
         if not fid or fid not in db["files"]:
@@ -2030,8 +2184,8 @@ def handle_document(message):
             return
         f = db["files"][fid]
         doc = message.document
-        if not doc.file_name.endswith(".py"):
-            reply_q(message, "❌ خاص يكون الملف بصيغة بايثون (.py) فقط.")
+        if not doc.file_name.endswith((".py", ".js", ".php", ".zip")):
+            reply_q(message, "❌ خاص يكون الملف بصيغة .py أو .js أو .php أو .zip فقط.")
             return
         file_info = bot.get_file(doc.file_id)
         downloaded = bot.download_file(file_info.file_path)
@@ -2044,119 +2198,98 @@ def handle_document(message):
             new_f.write(downloaded)
         f["filename"] = doc.file_name
         f["uploaded_at"] = now_iso()
+        f["file_ext"] = get_file_extension(doc.file_name)
         save_db()
         reply_q(message, "✅ تم تحديث ملف البوت بنجاح مع الحفاظ على جميع البيانات.")
         pending_action.pop(user_id, None)
         return
 
-    # معالجة رفع ملف جديد (رفع بوت)
-    if action_data.get("action") == "awaiting_file":
-        doc = message.document
-        if not doc.file_name.endswith(".py"):
-            reply_q(message, "❌ خاص يكون الملف بصيغة بايثون (.py) فقط.")
-            return
-
-        if get_points(user_id) < db["settings"]["daily_cost"]:
-            reply_q(message, f"❌ لا تملك نقاطاً كافية لرفع الملف. تحتاج على الأقل {db['settings']['daily_cost']} نقطة لتشغيل البوت ليوم واحد.")
-            pending_action.pop(user_id, None)
-            return
-
-        file_info = bot.get_file(doc.file_id)
-        downloaded = bot.download_file(file_info.file_path)
-        fid = short_id()
-        save_path = os.path.join(UPLOADS_DIR, f"{fid}_{doc.file_name}")
-        with open(save_path, "wb") as f:
-            f.write(downloaded)
-
-        if CRYPTO_AVAILABLE:
-            if encrypt_file(save_path):
-                save_path = save_path + ".enc"
-            else:
-                logger.warning("فشل تشفير الملف المرفوع، سيتم حفظه بدون تشفير.")
-
-        db["files"][fid] = {
-            "owner": str(user_id),
-            "filename": doc.file_name,
-            "path": save_path,
-            "status": "pending",
-            "uploaded_at": now_iso(),
-            "daily_billed": 0,
-            "pid": None,
-            "last_bill": None,
-            "approved_at": None,
-            "last_started": None,
-        }
-        save_db()
-        pending_action.pop(user_id, None)
-
-        reply_q(message, "✅ تم رفع الملف بنجاح، وسننتظر موافقة الإدارة لبدء التشغيل.")
-        kb = types.InlineKeyboardMarkup()
-        kb.add(
-            types.InlineKeyboardButton("✅ قبول", callback_data=f"approve_file_{fid}", style="success"),
-            types.InlineKeyboardButton("❌ رفض", callback_data=f"reject_file_{fid}", style="success"),
-        )
-        username = message.from_user.username or ""
-        caption = (
-            "📤 طلب رفع جديد وصل للإدارة\n\n"
-            f"👤 المستخدم: @{esc(username)} ({user_id})\n"
-            f"📄 الملف: {esc(doc.file_name)}"
-        )
-        photo_id = get_user_photo_file_id(user_id)
-        try:
-            if photo_id:
-                bot.send_photo(ADMIN_ID, photo_id, caption=q(caption), reply_markup=kb, parse_mode="HTML")
-            bot.send_document(
-                ADMIN_ID,
-                doc.file_id,
-                caption=q(f"📄 الملف المرفوع: {esc(doc.file_name)}"),
-                reply_markup=kb,
-                parse_mode="HTML",
-            )
-        except Exception as e:
-            logger.error(f"فشل إرسال طلب الرفع للأدمن: {e}")
-            bot.send_document(
-                ADMIN_ID,
-                doc.file_id,
-                caption=q(f"📄 الملف المرفوع: {esc(doc.file_name)}"),
-                reply_markup=kb,
-                parse_mode="HTML",
-            )
+    if pending_action.get(user_id, {}).get("action") != "awaiting_file":
+        reply_q(message, "📎 خاصك تضغط أولاً على «رفع ملف 📤» من القائمة قبل إرسال الملف.")
         return
 
-    # معالجة تثبيت المكتبات
-    if action_data.get("action") == "awaiting_library_file":
-        fid = action_data.get("fid")
-        if not fid or fid not in db["files"]:
-            reply_q(message, "❌ الملف غير موجود.")
-            pending_action.pop(user_id, None)
-            return
-        doc = message.document
-        file_name = doc.file_name
-        if not (file_name.endswith(".txt") or file_name.endswith(".zip")):
-            reply_q(message, "❌ يجب إرسال ملف بصيغة .txt أو .zip فقط.")
-            return
+    doc = message.document
+    file_ext = get_file_extension(doc.file_name)
 
-        # تحميل الملف
-        file_info = bot.get_file(doc.file_id)
-        downloaded = bot.download_file(file_info.file_path)
-        temp_dir = os.path.join(UPLOADS_DIR, "temp_libs")
-        os.makedirs(temp_dir, exist_ok=True)
-        temp_path = os.path.join(temp_dir, f"{user_id}_{fid}_{file_name}")
-        with open(temp_path, "wb") as f:
-            f.write(downloaded)
+    if file_ext not in ("py", "js", "php", "zip"):
+        reply_q(message, "❌ خاص يكون الملف بصيغة .py أو .js أو .php أو .zip فقط.")
+        return
 
-        # معالجة في خيط منفصل
-        threading.Thread(
-            target=process_library_installation,
-            args=(user_id, fid, temp_path, file_name, message.chat.id),
-            daemon=True
-        ).start()
-        reply_q(message, "⏳ جاري تثبيت المكتبات... سيتم إعلامك عند الانتهاء.")
+    if get_points(user_id) < db["settings"]["daily_cost"]:
+        reply_q(message, f"❌ لا تملك نقاطاً كافية لرفع الملف. تحتاج على الأقل {db['settings']['daily_cost']} نقطة لتشغيل البوت ليوم واحد.")
         pending_action.pop(user_id, None)
         return
 
-    # إذا لم يتطابق أي من الأوضاع المعلقة
-    reply_q(message, "📎 خاصك تضغط أولاً على «رفع ملف 📤» من القائمة قبل إرسال الملف، أو استخدم الزر المناسب لتثبيت المكتبات.")
+    file_info = bot.get_file(doc.file_id)
+    downloaded = bot.download_file(file_info.file_path)
+    fid = short_id()
+    save_path = os.path.join(UPLOADS_DIR, f"{fid}_{doc.file_name}")
+    with open(save_path, "wb") as f:
+        f.write(downloaded)
+
+    if CRYPTO_AVAILABLE:
+        if encrypt_file(save_path):
+            save_path = save_path + ".enc"
+        else:
+            logger.warning("فشل تشفير الملف المرفوع، سيتم حفظه بدون تشفير.")
+
+    db["files"][fid] = {
+        "owner": str(user_id),
+        "filename": doc.file_name,
+        "path": save_path,
+        "status": "pending",
+        "uploaded_at": now_iso(),
+        "daily_billed": 0,
+        "pid": None,
+        "last_bill": None,
+        "approved_at": None,
+        "last_started": None,
+        "file_ext": file_ext
+    }
+    save_db()
+    pending_action.pop(user_id, None)
+
+    icon = get_file_type_icon(doc.file_name)
+    ext_display = {
+        "py": "بايثون 🐍",
+        "js": "جافا سكريبت 🟨",
+        "php": "بي إتش بي 🐘",
+        "zip": "مضغوط 📦"
+    }.get(file_ext, file_ext)
+
+    reply_q(message, f"✅ تم رفع الملف بنجاح ({icon} {ext_display})، وسننتظر موافقة الإدارة لبدء التشغيل.")
+    kb = types.InlineKeyboardMarkup()
+    kb.add(
+        types.InlineKeyboardButton("✅ قبول", callback_data=f"approve_file_{fid}", style="success"),
+        types.InlineKeyboardButton("❌ رفض", callback_data=f"reject_file_{fid}", style="success"),
+    )
+    username = message.from_user.username or ""
+    caption = (
+        "📤 طلب رفع جديد وصل للإدارة\n\n"
+        f"👤 المستخدم: @{esc(username)} ({user_id})\n"
+        f"📄 الملف: {esc(doc.file_name)}\n"
+        f"📦 النوع: {ext_display} {icon}"
+    )
+    photo_id = get_user_photo_file_id(user_id)
+    try:
+        if photo_id:
+            bot.send_photo(ADMIN_ID, photo_id, caption=q(caption), reply_markup=kb, parse_mode="HTML")
+        bot.send_document(
+            ADMIN_ID,
+            doc.file_id,
+            caption=q(f"📄 الملف المرفوع: {esc(doc.file_name)} ({ext_display})"),
+            reply_markup=kb,
+            parse_mode="HTML",
+        )
+    except Exception as e:
+        logger.error(f"فشل إرسال طلب الرفع للأدمن: {e}")
+        bot.send_document(
+            ADMIN_ID,
+            doc.file_id,
+            caption=q(f"📄 الملف المرفوع: {esc(doc.file_name)} ({ext_display})"),
+            reply_markup=kb,
+            parse_mode="HTML",
+        )
 
 def show_my_files(chat_id, user_id):
     user_files = {fid: f for fid, f in db["files"].items() if f["owner"] == str(user_id)}
@@ -2165,9 +2298,11 @@ def show_my_files(chat_id, user_id):
         return
     for fid, f in user_files.items():
         status_text = STATUS_AR.get(f.get('status', ''), f.get('status', 'غير معروف'))
+        icon = get_file_type_icon(f.get('filename', ''))
+        ext = f.get('file_ext', get_file_extension(f.get('filename', '')))
         kb = types.InlineKeyboardMarkup()
-        kb.add(types.InlineKeyboardButton(f"📄 {esc(f['filename'])} - {status_text}", callback_data=f"file_detail_{fid}"))
-        send_q(chat_id, f"📄 {esc(f['filename'])}", reply_markup=kb)
+        kb.add(types.InlineKeyboardButton(f"{icon} {esc(f['filename'])} - {status_text}", callback_data=f"file_detail_{fid}"))
+        send_q(chat_id, f"{icon} {esc(f['filename'])} [{ext}]", reply_markup=kb)
 
 def show_file_detail(chat_id, user_id, fid):
     f = db["files"].get(fid)
@@ -2179,9 +2314,19 @@ def show_file_detail(chat_id, user_id, fid):
         return
 
     status_text = STATUS_AR.get(f.get('status', ''), f.get('status', 'غير معروف'))
+    icon = get_file_type_icon(f.get('filename', ''))
+    ext = f.get('file_ext', get_file_extension(f.get('filename', '')))
+    ext_display = {
+        "py": "بايثون 🐍",
+        "js": "جافا سكريبت 🟨",
+        "php": "بي إتش بي 🐘",
+        "zip": "مضغوط 📦"
+    }.get(ext, ext)
+
     info = (
-        f"📄 <b>{esc(f['filename'])}</b>\n\n"
+        f"{icon} <b>{esc(f['filename'])}</b>\n\n"
         f"📌 الحالة: {status_text}\n"
+        f"📦 النوع: {ext_display}\n"
         f"📅 تاريخ الرفع: {esc(f.get('uploaded_at', 'غير معروف'))}\n"
         f"📅 تاريخ الموافقة: {esc(f.get('approved_at', 'لم تتم بعد'))}\n"
         f"🧾 أيام الفوترة: {f.get('daily_billed', 0)}\n"
@@ -2192,14 +2337,14 @@ def show_file_detail(chat_id, user_id, fid):
     if f["status"] == "running":
         kb.add(types.InlineKeyboardButton("⏹️ إيقاف", callback_data=f"stop_file_{fid}", style="success"))
     elif f["status"] in ("approved", "stopped"):
+        # نسمح بتشغيل الملفات من نوع py, js, php, zip (لكن zip سيتم معالجته في start_hosted_bot)
         kb.add(types.InlineKeyboardButton("▶️ تشغيل", callback_data=f"start_file_{fid}", style="danger"))
     kb.add(types.InlineKeyboardButton("🗑️ حذف", callback_data=f"del_file_{fid}", style="primary"))
     kb.add(types.InlineKeyboardButton("📋 سجل التشغيل", callback_data=f"file_log_{fid}", style="success"))
-    kb.add(types.InlineKeyboardButton("🔑 تغيير التوكن", callback_data=f"file_change_token_{fid}", style="danger"))
-    kb.add(types.InlineKeyboardButton("🆔 تغيير معرف الأدمن", callback_data=f"file_change_admin_{fid}", style="primary"))
+    if ext == "py":
+        kb.add(types.InlineKeyboardButton("🔑 تغيير التوكن", callback_data=f"file_change_token_{fid}", style="danger"))
+        kb.add(types.InlineKeyboardButton("🆔 تغيير معرف الأدمن", callback_data=f"file_change_admin_{fid}", style="primary"))
     kb.add(types.InlineKeyboardButton("🔄 تحديث البوت", callback_data=f"file_update_{fid}", style="success"))
-    # زر تثبيت المكتبات
-    kb.add(types.InlineKeyboardButton("📦 تثبيت مكاتب", callback_data=f"install_libs_{fid}", style="success"))
     kb.add(types.InlineKeyboardButton("🔙 رجوع", callback_data="my_files", style="danger"))
 
     send_q(chat_id, info, reply_markup=kb)
@@ -2238,6 +2383,10 @@ def change_file_token(chat_id, user_id, fid):
     if str(user_id) != f["owner"] and not is_admin(user_id):
         send_q(chat_id, "🔒 ماعندكش الصلاحية.")
         return
+    ext = f.get('file_ext', get_file_extension(f.get('filename', '')))
+    if ext != "py":
+        send_q(chat_id, "❌ تغيير التوكن متاح فقط لملفات بايثون.")
+        return
     pending_action[user_id] = {"action": "awaiting_token_change", "fid": fid}
     send_q(chat_id, "🔑 أرسل التوكن الجديد (مثال: <code>123456:ABC-DEF</code>):")
 
@@ -2248,6 +2397,10 @@ def change_file_admin(chat_id, user_id, fid):
         return
     if str(user_id) != f["owner"] and not is_admin(user_id):
         send_q(chat_id, "🔒 ماعندكش الصلاحية.")
+        return
+    ext = f.get('file_ext', get_file_extension(f.get('filename', '')))
+    if ext != "py":
+        send_q(chat_id, "❌ تغيير معرف الأدمن متاح فقط لملفات بايثون.")
         return
     pending_action[user_id] = {"action": "awaiting_admin_change", "fid": fid}
     send_q(chat_id, "🔑 أرسل معرف الأدمن الجديد (رقم فقط):")
@@ -2261,7 +2414,7 @@ def update_file_prompt(chat_id, user_id, fid):
         send_q(chat_id, "🔒 ماعندكش الصلاحية.")
         return
     pending_action[user_id] = {"action": "awaiting_file_update", "fid": fid}
-    send_q(chat_id, "📤 أرسل ملف البوت الجديد (بصيغة .py) ليتم استبداله مع الحفاظ على جميع البيانات.")
+    send_q(chat_id, "📤 أرسل ملف البوت الجديد (بصيغة .py أو .js أو .php أو .zip) ليتم استبداله مع الحفاظ على جميع البيانات.")
 
 def show_store(chat_id):
     kb = types.InlineKeyboardMarkup(row_width=2)
@@ -2446,10 +2599,13 @@ def handle_file_decision(chat_id, data):
         points = get_points(owner_id)
         daily_cost = db["settings"]["daily_cost"]
         expected_days = points // daily_cost if daily_cost > 0 else 0
+        icon = get_file_type_icon(f.get('filename', ''))
+        ext = f.get('file_ext', get_file_extension(f.get('filename', '')))
 
         message_text = (
             f"🚀 <b>تم تشغيل ملف جديد</b>\n\n"
-            f"📄 اسم الملف: <code>{esc(f['filename'])}</code>\n"
+            f"{icon} اسم الملف: <code>{esc(f['filename'])}</code>\n"
+            f"📦 النوع: {ext}\n"
             f"👤 المالك: {esc(owner_name)}\n"
             f"🤖 يوزر البوت: @{BOT_USERNAME}\n"
             f"🆔 رقم الطلب: <code>{fid}</code>\n"
@@ -2462,7 +2618,7 @@ def handle_file_decision(chat_id, data):
             send_user_card(
                 owner_id,
                 owner_id,
-                f"🎉 تم قبول وتشغيل ملفك بنجاح.\n\n📄 الاسم: {esc(f['filename'])}",
+                f"🎉 تم قبول وتشغيل ملفك بنجاح.\n\n📄 الاسم: {esc(f['filename'])}\n📦 النوع: {ext}",
             )
         except Exception as e:
             logger.error(f"فشل إرسال إشعار الموافقة للمستخدم {f['owner']}: {e}")
@@ -2497,6 +2653,8 @@ def handle_file_action(chat_id, user_id, data):
         send_q(chat_id, "🔒 ماعندكش الصلاحية لتنفيذ هاد العملية.")
         return
 
+    ext = f.get('file_ext', get_file_extension(f.get('filename', '')))
+
     if act == "stop":
         stop_hosted_bot(fid)
         send_q(chat_id, "⏹️ تم إيقاف البوت بنجاح.")
@@ -2509,7 +2667,8 @@ def handle_file_action(chat_id, user_id, data):
     else:
         stop_hosted_bot(fid)
         try:
-            os.remove(f["path"])
+            if os.path.exists(f["path"]):
+                os.remove(f["path"])
         except Exception as e:
             logger.error(f"فشل حذف الملف {f['path']}: {e}")
         db["files"].pop(fid, None)
@@ -2557,12 +2716,14 @@ def handle_admin_callback(chat_id, user_id, data):
             send_q(chat_id, "📂 ماكاين حتى طلب رفع قيد الانتظار.")
             return
         for fid, f in pending.items():
+            icon = get_file_type_icon(f.get('filename', ''))
+            ext = f.get('file_ext', get_file_extension(f.get('filename', '')))
             kb = types.InlineKeyboardMarkup()
             kb.add(
                 types.InlineKeyboardButton("✅ قبول", callback_data=f"approve_file_{fid}", style="success"),
                 types.InlineKeyboardButton("❌ رفض", callback_data=f"reject_file_{fid}", style="success"),
             )
-            send_q(chat_id, f"📄 ملف جديد: {esc(f['filename'])}\n👤 المالك: {get_user_name(f['owner'])}", reply_markup=kb)
+            send_q(chat_id, f"{icon} ملف جديد: {esc(f['filename'])} [{ext}]\n👤 المالك: {get_user_name(f['owner'])}", reply_markup=kb)
 
     elif data == "admin_order_requests":
         pending = {oid: o for oid, o in db["orders"].items() if o["status"] == "pending"}
@@ -2600,6 +2761,8 @@ def handle_admin_callback(chat_id, user_id, data):
                 return
             for fid, f in db["files"].items():
                 status_text = STATUS_AR.get(f.get('status', ''), f.get('status', 'غير معروف'))
+                icon = get_file_type_icon(f.get('filename', ''))
+                ext = f.get('file_ext', get_file_extension(f.get('filename', '')))
                 kb = types.InlineKeyboardMarkup()
                 kb.add(
                     types.InlineKeyboardButton("⏹️ إيقاف", callback_data=f"stop_file_{fid}", style="success"),
@@ -2608,7 +2771,7 @@ def handle_admin_callback(chat_id, user_id, data):
                 owner_name = get_user_name(f['owner'])
                 send_q(
                     chat_id,
-                    f"📄 <b>{esc(f['filename'])}</b>\n"
+                    f"{icon} <b>{esc(f['filename'])}</b> [{ext}]\n"
                     f"الحالة: {status_text}\n"
                     f"المالك: {owner_name}",
                     reply_markup=kb
@@ -3008,7 +3171,7 @@ def callback_router(call):
             send_q(
                 chat_id,
                 (
-                    f"📤 أرسل ملف بايثون (.py) الآن.\n"
+                    f"📤 أرسل ملف بايثون (.py) أو جافا سكريبت (.js) أو PHP (.php) أو ZIP (.zip) الآن.\n"
                     f"📅 تكلفة التشغيل اليومية: {db['settings']['daily_cost']} نقطة.\n"
                     f"💎 رصيدك الحالي: {get_points(user_id)}"
                 ),
@@ -3042,7 +3205,7 @@ def callback_router(call):
                 chat_id,
                 (
                     "📖 <b>طريقة الاستعمال</b>\n\n"
-                    "1️⃣ اضغط على «رفع ملف 📤» وأرسل ملف البوت بصيغة .py.\n"
+                    "1️⃣ اضغط على «رفع ملف 📤» وأرسل ملف البوت بصيغة .py أو .js أو .php أو .zip.\n"
                     f"2️⃣ يتم خصم {db['settings']['daily_cost']} نقطة يومياً أثناء التشغيل.\n"
                     "3️⃣ بعد الموافقة، يبدأ البوت بالعمل تلقائياً.\n"
                     "4️⃣ ادعُ الأصدقاء لتحصل على نقاط إضافية والهدايا اليومية.\n"
@@ -3109,19 +3272,6 @@ def callback_router(call):
         elif data.startswith("file_update_"):
             fid = data[len("file_update_"):]
             update_file_prompt(chat_id, user_id, fid)
-
-        # معالجة تثبيت المكتبات
-        elif data.startswith("install_libs_"):
-            fid = data[len("install_libs_"):]
-            f = db["files"].get(fid)
-            if not f:
-                send_q(chat_id, "❌ الملف غير موجود.")
-                return
-            if str(user_id) != f["owner"] and not is_admin(user_id):
-                send_q(chat_id, "🔒 ماعندكش الصلاحية.")
-                return
-            pending_action[user_id] = {"action": "awaiting_library_file", "fid": fid}
-            send_q(chat_id, "📦 أرسل ملف المكتبات:\n- ملف .txt يحتوي على أسماء المكتبات (سطر لكل مكتبة)\n- أو ملف .zip يحتوي على ملف requirements.txt (أو أي ملفات .txt) وسيتم تثبيت المكتبات المذكورة.\nملاحظة: سيتم التثبيت في بيئة البوت الخاصة بك.")
 
         elif data == "rules":
             send_q(chat_id, RULES_TEXT)
@@ -3606,15 +3756,13 @@ def cmd_stats(message):
 
 # ===================== التشغيل =====================
 if __name__ == "__main__":
-    # تنظيف الملفات غير الموجودة من قاعدة البيانات أولاً
     cleanup_missing_files_from_db()
     clean_temp_decrypted_files()
     clean_orphaned_files()
     for fid, f in db["files"].items():
         if f.get("status") == "running":
-            # التحقق من وجود الملف قبل المحاولة
             if os.path.exists(f.get("path", "")):
-                start_hosted_bot(fid)
+                threading.Thread(target=start_hosted_bot, args=(fid,), daemon=True).start()
             else:
                 logger.warning(f"الملف {f.get('path')} غير موجود، تم تعيين الحالة إلى stopped")
                 f["status"] = "stopped"
